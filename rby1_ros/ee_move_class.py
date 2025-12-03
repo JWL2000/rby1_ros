@@ -32,6 +32,17 @@ def quat_diff(q1, q2):
 
     q_rel = mul_quat(inverse_quat(q1), q2)
     return q_rel
+
+def Quat2Rot(quat):
+    q_w, q_x, q_y, q_z = quat[0], quat[1], quat[2], quat[3]
+
+    # 회전 행렬 계산
+    R = np.array([
+        [1 - 2*(q_y**2 + q_z**2), 2*(q_x*q_y - q_z*q_w), 2*(q_x*q_z + q_y*q_w)],
+        [2*(q_x*q_y + q_z*q_w), 1 - 2*(q_x**2 + q_z**2), 2*(q_y*q_z - q_x*q_w)],
+        [2*(q_x*q_z - q_y*q_w), 2*(q_y*q_z + q_x*q_w), 1 - 2*(q_x**2 + q_y**2)]
+    ])
+    return R
 # ================================
 
 class Move_ee:
@@ -173,6 +184,21 @@ class Rotate_ee:
         else:
             self.is_done = True
             return self.last_desired_ee_quat, self.is_done
+    
+    def c_space_check(self, ee_pos:np.ndarray, rby1_dyn:RBY1Dyn, initial_q:np.ndarray):
+        for ee_quat in self.plan_desired_ee_quat:
+            ee_rot = Quat2Rot(ee_quat)
+            target_T = np.eye(4)
+            target_T[:3, :3] = ee_rot
+            target_T[0:3, 3] = ee_pos
+
+            ik_q = rby1_dyn.get_ik(2, target_T, initial_q, max_iters=100, tol=1e-6)
+            
+            if ik_q is None:
+                raise ValueError("IK solution not found.")
+            
+            if np.linalg.norm(ik_q - initial_q) > 0.2:
+                raise ValueError("IK solution too far from initial guess.")
 
 
 # =========== Test code ==============
