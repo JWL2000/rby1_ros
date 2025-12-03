@@ -53,9 +53,69 @@ class RBY1Dyn:
         J = self.dyn_robot.compute_body_jacobian(self.state, 0, 2)
         return J
     
-    def get_ik(self, target_T, initial_q, max_iters=100, tol=1e-6)->np.ndarray:
-        print("IK is not implemented yet.")
-        return initial_q
+    def get_ik(self, ee_idx, target_T, initial_q, max_iters=100, tol=1e-6) -> np.ndarray:
+        '''
+        ee_idx: 0-base, 1-torso, 2-right_arm, 3-left_arm
+        '''
+        q = np.array(initial_q, dtype=float).copy()
+
+        lam = 1e-3
+        
+        max_step = 0.1
+        for _ in range(max_iters):
+            self.state.set_q(q)
+            self.state.set_qdot(np.zeros_like(q))
+            self.dyn_robot.compute_forward_kinematics(self.state)
+            self.dyn_robot.compute_diff_forward_kinematics(self.state)
+
+            # 현재 EE pose (base -> link_right_arm_6, index 2)
+            current_T = self.dyn_robot.compute_transformation(self.state, 0, ee_idx)
+
+            # 위치/자세 error 계산
+            p_cur = current_T[0:3, 3]
+            R_cur = current_T[0:3, 0:3]
+
+            p_tar = target_T[0:3, 3]
+            R_tar = target_T[0:3, 0:3]
+
+            # position error
+            e_p = p_tar - p_cur
+
+            # orientation error
+            R_err = R_cur.T @ R_tar
+            e_o = 0.5 * np.array([
+                R_err[2, 1] - R_err[1, 2],
+                R_err[0, 2] - R_err[2, 0],
+                R_err[1, 0] - R_err[0, 1]
+            ])
+
+            # 6x1 pose error
+            e = np.concatenate((e_p, e_o))
+
+            if np.linalg.norm(e) < tol:
+                break
+
+            # Jacobian (body jacobian)
+            J = self.dyn_robot.compute_body_jacobian(self.state, 1, ee_idx)
+            J = np.array(J, dtype=float)
+
+            # shape 정리: 6 x N 이라고 가정, 아니면 transpose
+            if J.shape[0] != 6 and J.shape[1] == 6:
+                J = J.T
+
+            # Damped Least Squares
+            JT = J.T
+            A = J @ JT + (lam ** 2) * np.eye(6)
+            dq = JT @ np.linalg.solve(A, e)
+
+            dq = np.clip(dq, -max_step, max_step)
+
+            q = q + dq
+
+            if hasattr(self, "robot_min_q") and hasattr(self, "robot_max_q"):
+                q = np.minimum(np.maximum(q, self.robot_min_q), self.robot_max_q)
+
+        return q
 
 if __name__ == "__main__":
     print(rby.Model_A().robot_joint_names)
