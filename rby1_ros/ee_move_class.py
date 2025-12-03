@@ -3,7 +3,6 @@ import numpy as np
 from typing import List, Tuple
 import time
 from matplotlib import pyplot as plt
-from rby1_dyn import RBY1Dyn
 
 # ============Utils===============
 def conjugation(q):
@@ -46,7 +45,7 @@ def Quat2Rot(quat):
 # ================================
 
 class Move_ee:
-    def __init__(self, Hz=100, duration=2.0, dist_step=None):
+    def __init__(self, Hz=100, duration=2.0, dist_step=0.01):
         self.Hz = Hz
         self.duration = duration
         self.total_step = Hz * duration
@@ -65,9 +64,13 @@ class Move_ee:
         final_state = init_state + np.array(delta_ee_pos)
         self.trajectory_ee.get_coeff(init_state, final_state)
         
+        prev_pos = start_ee_pos.copy()
         for step in range(1, int(self.total_step) + 1):
             current_time = step / self.Hz
             pos, vel, acc = self.trajectory_ee.calculate_pva(current_time)
+            if np.linalg.norm(pos - prev_pos) > self.dist_step:
+                pos = prev_pos + (pos - prev_pos) / np.linalg.norm(pos - prev_pos) * self.dist_step
+            prev_pos = pos.copy()
             self.plan_desired_ee_pos.append(pos)
         
         self.is_done = False
@@ -115,25 +118,12 @@ class Move_ee:
             self.is_done = True
             return self.last_desired_ee_pos, self.is_done
     
-    def c_space_check(self, ee_rot:np.ndarray, rby1_dyn:RBY1Dyn, initial_q:np.ndarray):
-        for ee_pos in self.plan_desired_ee_pos:
-            target_T = np.eye(4)
-            target_T[:3, :3] = ee_rot
-            target_T[0:3, 3] = ee_pos
-
-            ik_q = rby1_dyn.get_ik(2, target_T, initial_q, max_iters=100, tol=1e-6)
-            
-            if ik_q is None:
-                raise ValueError("IK solution not found.")
-            
-            if np.linalg.norm(ik_q - initial_q) > 0.2:
-                raise ValueError("IK solution too far from initial guess.")
-    
 class Rotate_ee:
-    def __init__(self, Hz=100, duration=2.0):
+    def __init__(self, Hz=100, duration=2.0, degree_step=10.0):
         self.Hz = Hz
         self.duration = duration
         self.total_step = Hz * duration
+        self.degree_step = degree_step
 
         self.trajectory_ee_quat = None
         self.last_desired_ee_quat = None
@@ -165,13 +155,25 @@ class Rotate_ee:
             final_state = mul_quat(np.array(delta_ee_quat), init_state)
         else:
             raise ValueError("Type must be 'local' or 'global'")
-        
+         
         self.trajectory_ee_quat.get_coeff_quat(init_state, final_state)
         
+        prev_quat = start_ee_quat.copy()
         for step in range(1, int(self.total_step) + 1):
             current_time = step / self.Hz
-            pos, vel, acc = self.trajectory_ee_quat.calculate_pva_quat(current_time)
-            self.plan_desired_ee_quat.append(pos)
+            quat, quat_vel, quat_acc = self.trajectory_ee_quat.calculate_pva_quat(current_time)
+            quat_rel = quat_diff(prev_quat, quat)
+            theta_diff = 2.0 * np.arccos(np.clip(quat_rel[0], -1.0, 1.0))
+            if theta_diff > np.deg2rad(self.degree_step):
+                axis = quat_rel[1:4] / (np.linalg.norm(quat_rel[1:4]) + 1e-7)
+                limited_theta = np.deg2rad(self.degree_step)
+                limited_quat_diff = np.array([np.cos(limited_theta / 2.0),
+                                             axis[0] * np.sin(limited_theta / 2.0),
+                                             axis[1] * np.sin(limited_theta / 2.0),
+                                             axis[2] * np.sin(limited_theta / 2.0)])
+                quat = mul_quat(prev_quat, limited_quat_diff)
+            prev_quat = quat.copy()
+            self.plan_desired_ee_quat.append(quat)
         
         self.is_done = False
         return self.plan_desired_ee_quat
@@ -184,21 +186,6 @@ class Rotate_ee:
         else:
             self.is_done = True
             return self.last_desired_ee_quat, self.is_done
-    
-    def c_space_check(self, ee_pos:np.ndarray, rby1_dyn:RBY1Dyn, initial_q:np.ndarray):
-        for ee_quat in self.plan_desired_ee_quat:
-            ee_rot = Quat2Rot(ee_quat)
-            target_T = np.eye(4)
-            target_T[:3, :3] = ee_rot
-            target_T[0:3, 3] = ee_pos
-
-            ik_q = rby1_dyn.get_ik(2, target_T, initial_q, max_iters=100, tol=1e-6)
-            
-            if ik_q is None:
-                raise ValueError("IK solution not found.")
-            
-            if np.linalg.norm(ik_q - initial_q) > 0.2:
-                raise ValueError("IK solution too far from initial guess.")
 
 
 # =========== Test code ==============
@@ -206,13 +193,13 @@ def main_pos():
     Hz = 100
     duration = 2.0
 
-    mover = Move_ee(Hz=Hz, duration=duration, dist_step=0.001)
+    mover = Move_ee(Hz=Hz, duration=duration, dist_step=0.01)
 
     start_ee_pos = [0.0, 0.0, 0.0]
     delta_ee_pos = [0.1, 0.0, 0.0]
     
-    # _ = mover.plan_move_ee(start_ee_pos, delta_ee_pos)
-    _ = mover.plan_move_ee_by_distance(start_ee_pos, delta_ee_pos)
+    _ = mover.plan_move_ee(start_ee_pos, delta_ee_pos)
+    # _ = mover.plan_move_ee_by_distance(start_ee_pos, delta_ee_pos)
 
     print("Start moving end-effector...")
 
@@ -230,8 +217,8 @@ def main_pos():
 
         if step == 300:
             delta_ee_pos = [0.0, 0.2, 0.0]
-            # _ = mover.plan_move_ee(mover.last_desired_ee_pos, delta_ee_pos)
-            _ = mover.plan_move_ee_by_distance(mover.last_desired_ee_pos, delta_ee_pos)
+            _ = mover.plan_move_ee(mover.last_desired_ee_pos, delta_ee_pos)
+            # _ = mover.plan_move_ee_by_distance(mover.last_desired_ee_pos, delta_ee_pos)
         elif step > 601:
             break
 
@@ -257,10 +244,10 @@ def main_pos():
     plt.show()
 
 def main_rot():
-    Hz = 100
-    duration = 2.0
+    Hz = 50
+    duration = 3.0
 
-    rot = Rotate_ee(Hz=Hz, duration=duration)
+    rot = Rotate_ee(Hz=Hz, duration=duration, degree_step=10.0)
 
     start_ee_quat = np.array([0.7071, 0.7071, 0.0, 0.0]) # wxyz 순서
     
@@ -309,5 +296,5 @@ def main_rot():
     
 
 if __name__ == "__main__":
-    main_pos()
-    # main_rot()
+    # main_pos()
+    main_rot()
